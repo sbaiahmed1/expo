@@ -1,7 +1,7 @@
 import * as path from 'path';
 
 import { toValidAndroidResourceName } from '../utils';
-import type { FontObject } from '../withFonts';
+import type { FontObject, FontVariationAxes } from '../withFonts';
 import {
   groupByFamily,
   planFontCopies,
@@ -9,6 +9,9 @@ import {
   generateFontManagerCalls,
   assertNoConflictingDefinitions,
   assertAndroidCanLoadFonts,
+  assertValidWeights,
+  assertValidAxes,
+  warnAboutUnknownAxisTags,
 } from '../withFontsAndroid';
 
 const input = [
@@ -37,9 +40,19 @@ const input = [
     fontDefinitions: [
       { path: './assets/fonts/Inter[wght].ttf', weight: 400 },
       { path: './assets/fonts/Inter[wght].ttf', weight: 700 },
+      // The same file slanted by its `slnt` axis, so one variable font also backs the oblique.
+      { path: './assets/fonts/Inter[wght].ttf', weight: 400, style: 'italic', axes: { slnt: -10 } },
     ],
   },
 ] as const satisfies FontObject[];
+
+const declaring = (axes: FontVariationAxes) =>
+  groupByFamily([
+    {
+      fontFamily: 'Roboto Flex',
+      fontDefinitions: [{ path: './RobotoFlex.ttf', weight: 400, axes }],
+    },
+  ]);
 
 describe('groupByFamily', () => {
   it('should group font definitions by font family', () => {
@@ -54,6 +67,12 @@ describe('groupByFamily', () => {
       Inter: [
         { path: './assets/fonts/Inter[wght].ttf', weight: 400 },
         { path: './assets/fonts/Inter[wght].ttf', weight: 700 },
+        {
+          path: './assets/fonts/Inter[wght].ttf',
+          weight: 400,
+          style: 'italic',
+          axes: { slnt: -10 },
+        },
       ],
     };
 
@@ -130,6 +149,29 @@ describe('assertAndroidCanLoadFonts', () => {
       /"Inter".+Inter\[wght\]\.woff2.+\.ttf.+\.otf/s
     );
     expect(() => assertAndroidCanLoadFonts(declaring('./Inter[wght].woff'))).toThrow(/\.woff/);
+  });
+});
+
+describe('assertValidWeights', () => {
+  // app.json is not type checked, so `weight` arrives as whatever the file holds.
+  const declaring = (weight: unknown) =>
+    groupByFamily([
+      {
+        fontFamily: 'Inter',
+        fontDefinitions: [{ path: './Inter[wght].ttf', weight: weight as number }],
+      },
+    ]);
+
+  it('should accept the weights Android resolves a family by', () => {
+    expect(() => assertValidWeights(groupByFamily(input))).not.toThrow();
+    expect(() => assertValidWeights(declaring(1))).not.toThrow();
+    expect(() => assertValidWeights(declaring(1000))).not.toThrow();
+  });
+
+  it('should reject a weight that is missing or outside the range', () => {
+    expect(() => assertValidWeights(declaring(0))).toThrow(/1 to 1000/);
+    expect(() => assertValidWeights(declaring(1001))).toThrow(/1 to 1000/);
+    expect(() => assertValidWeights(declaring(undefined))).toThrow(/declares no weight/);
   });
 });
 
@@ -269,6 +311,14 @@ describe('getXmlSpecs', () => {
                   'app:fontVariationSettings': `'wght' 700`,
                 },
               },
+              {
+                $: {
+                  'app:font': '@font/inter_wght_',
+                  'app:fontStyle': 'italic',
+                  'app:fontWeight': '400',
+                  'app:fontVariationSettings': `'wght' 400, 'slnt' -10`,
+                },
+              },
             ],
           },
         },
@@ -278,10 +328,111 @@ describe('getXmlSpecs', () => {
     expect(getXmlSpecs(fontsDir, groupByFamily(input))).toEqual(expected);
   });
 
+  it('should leave an undefined axis out of the variation settings', () => {
+    const specs = getXmlSpecs(
+      '/path/to/fonts',
+      groupByFamily([
+        {
+          fontFamily: 'Roboto Flex',
+          fontDefinitions: [
+            { path: './RobotoFlex.ttf', weight: 400, axes: { slnt: undefined, wdth: 75 } },
+          ],
+        },
+      ])
+    );
+
+    expect(specs[0]?.xml['font-family'].font[0]?.$['app:fontVariationSettings']).toBe(
+      `'wght' 400, 'wdth' 75`
+    );
+  });
+
   it('should handle empty input', () => {
     const fontsDir = '/path/to/fonts';
     const result = getXmlSpecs(fontsDir, {});
     expect(result).toHaveLength(0);
+  });
+});
+
+describe('assertValidAxes', () => {
+  it('should accept registered and custom axis tags', () => {
+    expect(() => assertValidAxes(declaring({ slnt: -10, GRAD: -50 }))).not.toThrow();
+    expect(() => assertValidAxes(groupByFamily(input))).not.toThrow();
+  });
+
+  it('should accept an axis left undefined', () => {
+    // A conditional in app.config.ts writes `undefined` and the type allows it.
+    expect(() => assertValidAxes(declaring({ slnt: undefined }))).not.toThrow();
+  });
+
+  it('should accept a tag padded to four characters', () => {
+    // The registry pads a tag holding fewer than four letters or digits with trailing spaces.
+    expect(() => assertValidAxes(declaring({ 'AB  ': 1 }))).not.toThrow();
+  });
+
+  it('should reject an axis it cannot emit', () => {
+    expect(() => assertValidAxes(declaring({ slant: -10 }))).toThrow(/"slant".+four/s);
+    expect(() => assertValidAxes(declaring({ "a'b'": -10 }))).toThrow(/begins with a letter/);
+    expect(() => assertValidAxes(declaring({ '    ': -10 }))).toThrow(/begins with a letter/);
+    // A tag begins with a letter, so this one names no axis however the font is built.
+    expect(() => assertValidAxes(declaring({ '1abc': -10 }))).toThrow(/begins with a letter/);
+    // @ts-expect-error an axis takes a number
+    expect(() => assertValidAxes(declaring({ slnt: 'left' }))).toThrow();
+  });
+
+  it('should reject the wght axis, set or left undefined', () => {
+    // @ts-expect-error `weight` sets wght, so the type rejects it here
+    expect(() => assertValidAxes(declaring({ wght: 650 }))).toThrow(/"weight" field/);
+    // `undefined` must not slip past: `formatVariationSettings` spreads `axes` over the weight it
+    // derives, so the entry would drop wght and leave the file at its default instance.
+    expect(() => assertValidAxes(declaring({ wght: undefined }))).toThrow(/"weight" field/);
+  });
+
+  it('should reject a registered axis tag in the wrong case', () => {
+    expect(() => assertValidAxes(declaring({ SLNT: -10 }))).toThrow(/"SLNT".+"slnt"/s);
+    expect(() => assertValidAxes(declaring({ Wdth: 75 }))).toThrow(/"Wdth".+"wdth"/s);
+    expect(() => assertValidAxes(declaring({ WGHT: 650 }))).toThrow(/"weight" field/);
+  });
+
+  it('should reject axes that hold no entries to read', () => {
+    // app.json is not type checked, so `axes` arrives as whatever the file holds.
+    expect(() => assertValidAxes(declaring('slnt' as unknown as FontVariationAxes))).toThrow(
+      /not an object/
+    );
+    expect(() => assertValidAxes(declaring([-10] as unknown as FontVariationAxes))).toThrow(
+      /not an object/
+    );
+  });
+});
+
+describe('warnAboutUnknownAxisTags', () => {
+  let warn: jest.SpyInstance;
+
+  beforeEach(() => {
+    warn = jest.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  it('should warn about a foundry tag written in lowercase', () => {
+    // Roboto Flex declares `GRAD`, so `grad` names no axis and Android applies nothing.
+    warnAboutUnknownAxisTags(declaring({ grad: -50 }));
+
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/"grad".+"GRAD"/s));
+  });
+
+  it('should stay quiet about tags a font can declare', () => {
+    warnAboutUnknownAxisTags(declaring({ slnt: -10, GRAD: -50, XTR2: 1, 'AB  ': 1 }));
+    warnAboutUnknownAxisTags(groupByFamily(input));
+
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('should stay quiet about an axis left undefined', () => {
+    warnAboutUnknownAxisTags(declaring({ grad: undefined }));
+
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 
