@@ -6,10 +6,11 @@ import { use, useEffect, useMemo, useSyncExternalStore } from 'react';
 import { useContextKey } from '../Route';
 import { getRouteInfoFromState } from '../global-state/getRouteInfoFromState';
 import { LoaderContext } from '../loaders/LoaderContext';
+import { defaultLoaderRouteRegistry } from '../loaders/LoaderRouteRegistry';
 import { ServerDataLoaderContext } from '../loaders/ServerDataLoaderContext';
 import { readLoaderData } from '../loaders/readLoaderData';
 import { fetchLoader } from '../loaders/utils';
-import { useStateForPath } from '../react-navigation/native';
+import { useRoute, useStateForPath } from '../react-navigation/native';
 import { getSingularId } from '../useScreens';
 
 type LoaderFunctionResult<T extends LoaderFunction<any>> =
@@ -46,6 +47,7 @@ export function useLoaderData<T extends LoaderFunction<any> = any>(): LoaderFunc
   useSyncExternalStore(client.subscribe, client.getSnapshot, client.getSnapshot);
 
   const stateForPath = useStateForPath();
+  const route = useRoute();
   const contextKey = useContextKey();
 
   const resolvedPath = useMemo(() => {
@@ -85,6 +87,7 @@ export function useLoaderData<T extends LoaderFunction<any> = any>(): LoaderFunc
     delete hydrationData[resolvedPath];
   }
 
+  defaultLoaderRouteRegistry.claim(route.key, resolvedPath);
   const result = readLoaderData<LoaderFunctionResult<T>>(ctx, resolvedPath, fetchLoader);
   return result instanceof Promise ? use(result) : result;
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { type PropsWithChildren, Fragment, type ComponentType, useMemo } from 'react';
+import { type PropsWithChildren, Fragment, type ComponentType, useCallback, useMemo } from 'react';
 import { Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
@@ -14,6 +14,7 @@ import { ServerContext } from './global-state/serverLocationContext';
 import { StoreContext } from './global-state/storeContext';
 import { shouldAppendNotFound, shouldAppendSitemap } from './global-state/utils';
 import { LinkPreviewContextProvider } from './link/preview/LinkPreviewContext';
+import { defaultLoaderRouteRegistry } from './loaders/LoaderRouteRegistry';
 import { handleNavigationOnReady } from './navigationEvents/navigation';
 import { Screen } from './primitives';
 import type { LinkingOptions, NavigationAction } from './react-navigation/native';
@@ -134,6 +135,13 @@ function ContextNavigator({
     : undefined;
 
   const store = useStore(context, linking, serverUrl);
+  const onStateChange = useCallback(
+    (state: Parameters<typeof store.onStateChange>[0]) => {
+      store.onStateChange(state);
+      defaultLoaderRouteRegistry.reconcile(state);
+    },
+    [store]
+  );
 
   useDomComponentNavigation();
 
@@ -159,7 +167,7 @@ function ContextNavigator({
         initialState={store.state}
         linking={store.linking as LinkingOptions<any>}
         onUnhandledAction={onUnhandledAction}
-        onStateChange={store.onStateChange}
+        onStateChange={onStateChange}
         documentTitle={documentTitle}
         onReady={onNavigationReady}>
         <ServerContext.Provider value={serverContext}>
