@@ -1,12 +1,13 @@
 #!/usr/bin/env bunx tsx
 
 import spawnAsync from '@expo/spawn-async';
-import { type WriteStream, createWriteStream } from 'fs';
+import { type WriteStream, createReadStream, createWriteStream } from 'fs';
 import fs from 'fs/promises';
 import https from 'https';
+import { streamToAsyncIterable, TarTypeFlag, untar } from 'multitars';
 import path from 'path';
+import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
-import * as tar from 'tar';
 
 const SQLITE_DOWNLOAD_URL = 'https://github.com/sqlite/sqlite/archive';
 const SQLCIPHER_DOWNLOAD_URL = 'https://github.com/sqlcipher/sqlcipher/archive';
@@ -135,11 +136,36 @@ async function downloadFileAsync(url: string, outputPath: string): Promise<strin
 }
 
 async function extractTarballAsync(filePath: string, outputDir: string): Promise<void> {
-  await tar.x({
-    file: filePath,
-    cwd: outputDir,
-    strip: 1,
-  });
+  const output = path.resolve(outputDir) + path.sep;
+  await fs.mkdir(output, { recursive: true });
+
+  const input = Readable.toWeb(createReadStream(filePath)) as ReadableStream;
+  const entries = untar(input.pipeThrough(new DecompressionStream('gzip')));
+
+  for await (const entry of entries) {
+    // The tarball nests everything under one release directory; drop that prefix.
+    const name = stripLeadingPathComponent(path.normalize(entry.name));
+    if (!name) {
+      continue;
+    }
+    const resolved = path.resolve(output, name);
+    // Refuse entries that would land outside the output directory.
+    if (!resolved.startsWith(output)) {
+      continue;
+    }
+
+    if (entry.typeflag === TarTypeFlag.DIRECTORY) {
+      await fs.mkdir(resolved, { recursive: true });
+    } else if (entry.typeflag === TarTypeFlag.FILE) {
+      await fs.mkdir(path.dirname(resolved), { recursive: true });
+      await fs.writeFile(resolved, streamToAsyncIterable(entry.stream()), { mode: entry.mode });
+    }
+  }
+}
+
+function stripLeadingPathComponent(name: string): string {
+  const separatorIndex = name.indexOf(path.sep);
+  return separatorIndex > -1 ? name.slice(separatorIndex + 1) : '';
 }
 
 async function buildSqliteAsync({

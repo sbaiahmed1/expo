@@ -5626,12 +5626,12 @@ importers:
       expo-module-scripts:
         specifier: workspace:*
         version: link:../expo-module-scripts
+      multitars:
+        specifier: ^1.0.0
+        version: 1.0.0
       react-error-boundary:
         specifier: ^4.0.11
         version: 4.1.2(react@19.2.3)
-      tar:
-        specifier: ^7.5.22
-        version: 7.5.22
 
   packages/expo-sqlite/dev-plugin-webui:
     dependencies:
